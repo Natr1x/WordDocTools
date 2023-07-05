@@ -52,3 +52,4 @@ function Get-XPathArgs {
     }
     return $selArg
 }
+Export-ModuleMember -Function Get-XPathArgs
