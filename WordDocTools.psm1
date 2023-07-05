@@ -54,22 +54,104 @@ function Get-XPathArgs {
 }
 Export-ModuleMember -Function Get-XPathArgs
 
+class Delimiters {
+    [string]$Run = $null
+    [string]$Paragraph = $null
+    [string]$Cell = $null
+    [string]$Row = $null
+}
+
+class WordObject {
+    [string] ContentAsText([Delimiters]$delims) {
+        return ""
+    }
+}
+
+class WordRun : WordObject {
+    [string[]]$Text
+
+    [string] ContentAsText([Delimiters]$delims) {
+        return -join $this.Text
+    }
+}
+
+class WordParagraph : WordObject {
+    [WordRun[]]$Runs
+
+    [string] ContentAsText([Delimiters]$delims) {
+        [string[]]$childTexts = $this.Runs |% ContentAsText $delims
+        [string]$delim = $delims.Run
+
+        if ($delim -ne $null) {
+            return $childTexts -join $delim
+        } else {
+            return -join $childTexts
+        }
+    }
+}
+
+class WordTableCell : WordObject {
+    [WordParagraph[]]$Paragraphs
+
+    [string] ContentAsText([Delimiters]$delims) {
+        [string[]]$childTexts = $this.Paragraphs |% ContentAsText $delims
+        [string]$delim = $delims.Paragraph
+
+        if ($delim -ne $null) {
+            return $childTexts -join $delim
+        } else {
+            return -join $childTexts
+        }
+    }
+}
+
+class WordTableRow : WordObject {
+    [WordTableCell[]]$Cells
+
+    [string] ContentAsText([Delimiters]$delims) {
+        [string[]]$childTexts = $this.Cells |% ContentAsText $delims
+        [string]$delim = $delims.Cell
+
+        if ($delim -ne $null) {
+            return $childTexts -join $delim
+        } else {
+            return -join $childTexts
+        }
+    }
+}
+
+class WordTable : WordObject {
+    [WordTableRow[]]$Rows
+
+    [string] ContentAsText([Delimiters]$delims) {
+        [string[]]$childTexts = $this.Rows |% ContentAsText $delims
+        [string]$delim = $delims.Row
+
+        if ($delim -ne $null) {
+            return $childTexts -join $delim
+        } else {
+            return -join $childTexts
+        }
+    }
+}
+
 <#
     .Synopsis
-    Extract and join the text from the runs in a '<w:p>' node.
+    Extract the text from an xml node form a word document.
 
     .Description
-    Extract and join the text from the runs in a '<w:p>' node.
+    Extract the text from an xml node form a word document. Use something like
+    'Select-Xml -XPath "//w:tbl" @worddocargs |% Node' to acquire the nodes.
 
     .Parameter Node
-    The xml node to extract. Should be a '<w:p>' node.
+    The xml node to extract.
 
     .Example
     $xpathargs = Get-XPathArgs -Path '.\MyExample.docx'
-    $paragraphs = Select-Xml -XPath '//w:p' @xpathargs |% Node
-    Get-ParagraphText -Node $paragraphs
+    $doctables = Select-Xml -XPath '//w:tbl' @xpathargs |% Node
+    Get-DocumentItem -Node ($doctables[0])
 #>
-function Get-ParagraphText {
+function Get-DocumentItem {
     param(
         [Parameter(
             Position = 0,
@@ -78,60 +160,108 @@ function Get-ParagraphText {
         [System.Xml.XmlNode[]]$Node
     )
     process {
-        Write-Verbose "Get-ParagraphText: Processing Paragraph"
-        foreach ($p in $Node) {
-            -join ($p.r.t |% {
-                if ($_ -is [string]) {
-                    $_
-                } elseif ($_.'#text') {
-                    $_.'#text'
+        foreach ($n in $Node) {
+            Write-Verbose "Get-DocumentItem: Parsing $($n.Name)"
+            switch ($n.Name) {
+                'w:tbl' {
+                    [WordTable]@{
+                        Rows = @(Get-DocumentItem -Node $n.tr @PSBoundParameters)
+                    }
                 }
-            })
+                'w:tr' {
+                    [WordTableRow]@{
+                        Cells = @(Get-DocumentItem -Node $n.tc @PSBoundParameters)
+                    }
+                }
+                'w:tc' {
+                    [WordTableCell]@{
+                        Paragraphs = @(Get-DocumentItem -Node $n.p @PSBoundParameters)
+                    }
+                }
+                'w:p' {
+                    [WordParagraph]@{
+                        Runs = @(Get-DocumentItem -Node $n.r @PSBoundParameters)
+                    }
+                }
+                'w:r' {
+                    [WordRun]@{
+                        Text = @($n.t |% {
+                            if ($_ -is [string]) {
+                                $_
+                            } elseif ($_.'#text') {
+                                $_.'#text'
+                            }
+                        })
+                    }
+                }
+            }
         }
     }
 }
-Export-ModuleMember -Function Get-ParagraphText
+Export-ModuleMember -Function Get-DocumentItem
 
 <#
     .Synopsis
-    Extract the text from the cells in a '<w:tbl>' node.
+    Extract the text content from a document item.
 
     .Description
-    Extract the text from the cells in a '<w:tbl>' node. Use something like
-    'Select-Xml -XPath "//w:tbl" @worddocargs |% Node' to acquire the nodes.
+    Extract the text content from a document item. Use 'Get-DocumentItem' to
+    get items that text can be extracted from.
 
-    .Parameter Node
-    The xml node to extract. Should be a '<w:tbl>' node.
+    .Parameter DocumentItem
+    The part of the document to get as text
+
+    .Parameter RunDelimiter
+    Delimeter to use between runs
+
+    .Parameter ParagraphDelimiter
+    Delimeter to use between paragraphs
 
     .Parameter CellDelimiter
-    Separator to delimit cells with inside a row.
+    Delimeter to use between cells
+
+    .Parameter RowDelimiter
+    Delimeter to use between rows
 
     .Example
     $xpathargs = Get-XPathArgs -Path '.\MyExample.docx'
-    $doctables = Select-Xml -XPath '//w:tbl' @xpathargs |% Node
-    Get-TableCells -Node ($doctables[0])
+    $doctables = Select-Xml -XPath '//w:tbl' @xpathargs
+    $doctables |Get-DocumentItem |Get-TextFromDocumentItem
 #>
-function Get-TableCells {
+function Get-TextFromDocumentItem {
     param(
         [Parameter(
             Position = 0,
             ValueFromPipeLine = $True,
             ValueFromPipeLineByPropertyName = $True)]
-        [System.Xml.XmlNode[]]$Node,
+        [WordObject[]]$DocumentItem,
+
         [Parameter(Mandatory = $False)]
-        [string]$CellDelimiter = " | "
+        [string]$RunDelimiter = "",
+
+        [Parameter(Mandatory = $False)]
+        [string]$ParagraphDelimiter = "",
+
+        [Parameter(Mandatory = $False)]
+        [string]$CellDelimiter = " | ",
+
+        [Parameter(Mandatory = $False)]
+        [string]$RowDelimiter = [System.Environment]::NewLine
     )
+    begin {
+        Write-Verbose "Get-TextFromDocumentItem: Begin"
+        $delims = [Delimiters]@{
+            Run = $RunDelimiter
+            Paragraph = $ParagraphDelimiter
+            Cell = $CellDelimiter
+            Row = $RowDelimiter
+        }
+    }
     process {
-        Write-Verbose "Get-TableCells: Processing TableNode"
-        foreach ($t in $Node) {
-            foreach ($r in $t.tr) {
-                $cols = @()
-                foreach ($c in $r.tc) {
-                    $cols += ,(Get-ParagraphText $c.p)
-                }
-                $cols -join "$CellDelimiter"
-            }
+        Write-Verbose "Get-TextFromDocumentItem: Processing DocumentItem"
+        foreach ($b in $DocumentItem) {
+            $b.ContentAsText($delims)
         }
     }
 }
-Export-ModuleMember -Function Get-TableCells
+Export-ModuleMember -Function Get-TextFromDocumentItem
